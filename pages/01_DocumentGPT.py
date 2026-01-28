@@ -1,30 +1,124 @@
 import streamlit as st
 import time
+from langchain.prompts import ChatPromptTemplate
+from langchain.storage import LocalFileStore
+from langchain.embeddings import CacheBackedEmbeddings
+from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain.vectorstores import FAISS
+from langchain.document_loaders import UnstructuredFileLoader
+from langchain.text_splitter import CharacterTextSplitter
+from langchain.schema.runnable import RunnableLambda
+from langchain.schema.runnable import RunnablePassthrough
+from langchain.chat_models import ChatOpenAI
+from pathlib import Path
 
-st.title("DocumentGPT")
 
-if "messages" not in st.session_state:
-    # session state : it helps not to refresh data
-    st.session_state["messages"] = []
+# if "messages" not in st.session_state:
+#     st.session_state["messages"] = []
+    
+
+llm = ChatOpenAI(
+    temperature=0.1
+)
+
+
+# how to !cache! like this heavy function?
+@st.cache_data(show_spinner="Embedding file....")
+def embed_file(file):
+    file_content = file.read()
+    file_path = f"./.cache/files/{file.name}"
+    # p = Path(file_path)
+    # st.write("Saved:", file_path, "size:", p.stat().st_size)
+    with open(file_path, "wb") as f:
+        f.write(file_content)
+
+    cache_dir = LocalFileStore(f"./.cache/embeddings/{file.name}")
+    splitter = CharacterTextSplitter(
+        separator="\n",
+        chunk_size=600,
+        chunk_overlap=100,
+    )
+    loader = UnstructuredFileLoader(file_path)
+    docs = loader.load_and_split(text_splitter=splitter)
+    embeddings = OpenAIEmbeddings()
+    cached_embeddings = CacheBackedEmbeddings.from_bytes_store(
+        embeddings, cache_dir
+    )
+    vectorstore = FAISS.from_documents(docs, cached_embeddings)
+    # 260127 : retriver에 대한 복습 필요
+    retriver = vectorstore.as_retriever()
+    
+    return retriver
 
 
 def send_message(message, role, save=True):
     with st.chat_message(role):
-        st.write(message)
+        st.markdown(message)
     if save:
-        st.session_state["messages"].append({"message":message, "role":role})
-
-for message in st.session_state["messages"]:
-    send_message(message["message"], message["role"], save=False)
+        st.session_state["messages"].append({"message": message, "role": role})
 
 
-message = st.chat_input("Send a message to the ai")
+def paint_history():
+    for message in st.session_state["messages"]:
+        send_message(
+            message["message"],
+            message["role"],
+            save=False
+        )
 
-if message:
-    send_message(message, "human")
-    time.sleep(1)
-    send_message(f"You said {message}", "ai")
 
-    with st.sidebar:
-        st.write(st.session_state)
 
+def format_docs(docs):
+    return "\n\n".join(document.page_content for document in docs)
+
+
+
+prompt = ChatPromptTemplate.from_messages([
+    ("system", 
+     """
+     Answer the question using ONLY the following context. If you don't know the answer,
+     just say you don't know. DON'T make anything up.
+     
+     Context: {context}
+     """),
+    ("human", "{question}")
+])
+
+
+st.title("DocumentGPT")
+
+
+st.markdown("""
+Welcome!
+
+Use this chatbot to ask questions to an AI about your files!
+
+Upload your files on the sidebar.
+""")
+
+with st.sidebar:
+    file = st.file_uploader(
+        "Upload a .txt .pdf or .docx file", 
+        type=["pdf", "txt", "docx"]
+    )
+
+
+if file:
+    retriever = embed_file(file)
+    send_message("I'm ready! Ask away!", "ai", save=False)
+    paint_history()
+    message = st.chat_input("Ask anything about your file...")
+    
+    if message:
+        send_message(message, "human")
+        chain = ({
+            "context": retriever | RunnableLambda(format_docs),
+            "question": RunnablePassthrough()
+        } | prompt | llm)
+        
+        # We are not using chain
+        response = chain.invoke(message)
+        send_message(response.content, "ai")
+        
+else:
+    st.session_state["messages"] = []
