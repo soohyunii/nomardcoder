@@ -10,6 +10,7 @@ from langchain.text_splitter import CharacterTextSplitter
 from langchain.schema.runnable import RunnableLambda
 from langchain.schema.runnable import RunnablePassthrough
 from langchain.chat_models import ChatOpenAI
+from langchain.callbacks.base import BaseCallbackHandler
 from pathlib import Path
 
 
@@ -17,8 +18,28 @@ from pathlib import Path
 #     st.session_state["messages"] = []
     
 
+class ChatCallbackHandler(BaseCallbackHandler):
+    message = ""
+    
+    def on_llm_start(self, *args, **kwargs):
+        self.message_box = st.empty()
+            
+    def on_llm_end(self, *args, **kwargs):
+        save_message(self.message, "ai")
+            
+    def on_llm_new_token(self, token, *args, **kwargs):
+        self.message += token
+        self.message_box.markdown(self.message)
+
+    
+
+
 llm = ChatOpenAI(
-    temperature=0.1
+    temperature=0.1,
+    streaming=True,
+    callbacks=[
+        ChatCallbackHandler(),
+    ]
 )
 
 
@@ -31,13 +52,14 @@ def embed_file(file):
     # st.write("Saved:", file_path, "size:", p.stat().st_size)
     with open(file_path, "wb") as f:
         f.write(file_content)
-
+    
     cache_dir = LocalFileStore(f"./.cache/embeddings/{file.name}")
     splitter = CharacterTextSplitter(
         separator="\n",
         chunk_size=600,
         chunk_overlap=100,
     )
+    # real_path = (Path(__file__).resolve().parent.parent / ".cache" / "files")
     loader = UnstructuredFileLoader(file_path)
     docs = loader.load_and_split(text_splitter=splitter)
     embeddings = OpenAIEmbeddings()
@@ -51,13 +73,16 @@ def embed_file(file):
     return retriver
 
 
+def save_message(message, role):
+    st.session_state["messages"].append({"message": message, "role": role})
+
 def send_message(message, role, save=True):
     with st.chat_message(role):
         st.markdown(message)
     if save:
-        st.session_state["messages"].append({"message": message, "role": role})
+        save_message(message, role)
 
-
+# show message already done
 def paint_history():
     for message in st.session_state["messages"]:
         send_message(
@@ -117,8 +142,10 @@ if file:
         } | prompt | llm)
         
         # We are not using chain
-        response = chain.invoke(message)
-        send_message(response.content, "ai")
+        with st.chat_message("ai"):
+            chain.invoke(message)
+        
         
 else:
+    # at first, initialize
     st.session_state["messages"] = []
